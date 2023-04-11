@@ -2,12 +2,13 @@ import { strict as assert } from 'assert';
 import testUtils, { GLOBAL, waitTillBeenCalled } from '../test-utils';
 import RedisClient, { RedisClientType } from '.';
 import { RedisClientMultiCommandType } from './multi-command';
-import { RedisCommandArguments, RedisCommandRawReply, RedisModules, RedisFunctions, RedisScripts } from '../commands';
-import { AbortError, ClientClosedError, ConnectionTimeoutError, DisconnectsClientError, SocketClosedUnexpectedlyError, WatchError } from '../errors';
+import { RedisCommandRawReply, RedisModules, RedisFunctions, RedisScripts } from '../commands';
+import { AbortError, ClientClosedError, ClientOfflineError, ConnectionTimeoutError, DisconnectsClientError, SocketClosedUnexpectedlyError, WatchError } from '../errors';
 import { defineScript } from '../lua-script';
 import { spy } from 'sinon';
 import { once } from 'events';
 import { ClientKillFilters } from '../commands/CLIENT_KILL';
+import { promisify } from 'util';
 
 export const SQUARE_SCRIPT = defineScript({
     SCRIPT: 'return ARGV[1] * ARGV[1];',
@@ -142,26 +143,9 @@ describe('Client', () => {
     });
 
     describe('legacyMode', () => {
-        function sendCommandAsync<
-            M extends RedisModules,
-            F extends RedisFunctions,
-            S extends RedisScripts
-        >(
-            client: RedisClientType<M, F, S>,
-            args: RedisCommandArguments
-        ): Promise<RedisCommandRawReply> {
-            return new Promise((resolve, reject) => {
-                (client as any).sendCommand(args, (err: Error | undefined, reply: RedisCommandRawReply) => {
-                    if (err) return reject(err);
-
-                    resolve(reply);
-                });
-            });
-        }
-
         testUtils.testWithClient('client.sendCommand should call the callback', async client => {
             assert.equal(
-                await sendCommandAsync(client, ['PING']),
+                await promisify(client.sendCommand).call(client, 'PING'),
                 'PONG'
             );
         }, {
@@ -181,6 +165,28 @@ describe('Client', () => {
             }
         });
 
+        testUtils.testWithClient('client.sendCommand should reply with error', async client => {
+            await assert.rejects(
+                promisify(client.sendCommand).call(client, '1', '2')
+            );
+        }, {
+            ...GLOBAL.SERVERS.OPEN,
+            clientOptions: {
+                legacyMode: true
+            }
+        });
+
+        testUtils.testWithClient('client.hGetAll should reply with error', async client => {
+            await assert.rejects(
+                promisify(client.hGetAll).call(client)
+            );
+        }, {
+            ...GLOBAL.SERVERS.OPEN,
+            clientOptions: {
+                legacyMode: true
+            }
+        });
+
         testUtils.testWithClient('client.v4.sendCommand should return a promise', async client => {
             assert.equal(
                 await client.v4.sendCommand(['PING']),
@@ -193,26 +199,21 @@ describe('Client', () => {
             }
         });
 
-        function setAsync<
-            M extends RedisModules,
-            F extends RedisFunctions,
-            S extends RedisScripts
-        >(
-            client: RedisClientType<M, F, S>,
-            ...args: Array<any>
-        ): Promise<RedisCommandRawReply> {
-            return new Promise((resolve, reject) => {
-                (client as any).set(...args, (err: Error | undefined, reply: RedisCommandRawReply) => {
-                    if (err) return reject(err);
-
-                    resolve(reply);
-                });
-            });
-        }
+        testUtils.testWithClient('client.v4.{command} should return a promise', async client => {
+            assert.equal(
+                await client.v4.ping(),
+                'PONG'
+            );
+        }, {
+            ...GLOBAL.SERVERS.OPEN,
+            clientOptions: {
+                legacyMode: true
+            }
+        });
 
         testUtils.testWithClient('client.{command} should accept vardict arguments', async client => {
             assert.equal(
-                await setAsync(client, 'a', 'b'),
+                await promisify(client.set).call(client, 'a', 'b'),
                 'OK'
             );
         }, {
@@ -224,7 +225,7 @@ describe('Client', () => {
 
         testUtils.testWithClient('client.{command} should accept arguments array', async client => {
             assert.equal(
-                await setAsync(client, ['a', 'b']),
+                await promisify(client.set).call(client, ['a', 'b']),
                 'OK'
             );
         }, {
@@ -236,8 +237,28 @@ describe('Client', () => {
 
         testUtils.testWithClient('client.{command} should accept mix of arrays and arguments', async client => {
             assert.equal(
-                await setAsync(client, ['a'], 'b', ['EX', 1]),
+                await promisify(client.set).call(client, ['a'], 'b', ['EX', 1]),
                 'OK'
+            );
+        }, {
+            ...GLOBAL.SERVERS.OPEN,
+            clientOptions: {
+                legacyMode: true
+            }
+        });
+
+        testUtils.testWithClient('client.hGetAll should return object', async client => {
+            await client.v4.hSet('key', 'field', 'value');
+            
+            assert.deepEqual(
+                await promisify(client.hGetAll).call(client, 'key'),
+                Object.create(null, {
+                    field: {
+                        value: 'value',
+                        configurable: true,
+                        enumerable: true
+                    }
+                })
             );
         }, {
             ...GLOBAL.SERVERS.OPEN,
@@ -330,6 +351,30 @@ describe('Client', () => {
             }
         });
 
+        testUtils.testWithClient('client.multi.hGetAll should return object', async client => { 
+            assert.deepEqual(
+                await multiExecAsync(
+                    client.multi()
+                        .hSet('key', 'field', 'value')
+                        .hGetAll('key')
+                ),
+                [
+                    1,
+                    Object.create(null, {
+                        field: {
+                            value: 'value',
+                            configurable: true,
+                            enumerable: true
+                        }
+                    })
+                ]
+            );
+        }, {
+            ...GLOBAL.SERVERS.OPEN,
+            clientOptions: {
+                legacyMode: true
+            }
+        });
     });
 
     describe('events', () => {
@@ -425,6 +470,19 @@ describe('Client', () => {
             );
         }, GLOBAL.SERVERS.OPEN);
 
+        testUtils.testWithClient('should reject the whole chain upon client disconnect', async client => {
+            await client.disconnect();
+
+            return assert.rejects(
+                client.multi()
+                    .ping()
+                    .set('key', 'value')
+                    .get('key')
+                    .exec(),
+                ClientClosedError
+            );
+        }, GLOBAL.SERVERS.OPEN);
+
         testUtils.testWithClient('with script', async client => {
             assert.deepEqual(
                 await client.multi()
@@ -460,14 +518,23 @@ describe('Client', () => {
             );
         }, GLOBAL.SERVERS.OPEN);
 
-        testUtils.testWithClient('execAsPipeline', async client => {
-            assert.deepEqual(
-                await client.multi()
-                    .ping()
-                    .exec(true),
-                ['PONG']
-            );
-        }, GLOBAL.SERVERS.OPEN);
+        describe('execAsPipeline', () => {
+            testUtils.testWithClient('exec(true)', async client => {
+                assert.deepEqual(
+                    await client.multi()
+                        .ping()
+                        .exec(true),
+                    ['PONG']
+                );
+            }, GLOBAL.SERVERS.OPEN);
+
+            testUtils.testWithClient('empty execAsPipeline', async client => {
+                assert.deepEqual(
+                    await client.multi().execAsPipeline(),
+                    []
+                );
+            }, GLOBAL.SERVERS.OPEN);
+        });
 
         testUtils.testWithClient('should remember selected db', async client => {
             await client.multi()
@@ -817,13 +884,14 @@ describe('Client', () => {
             quitPromise = client.quit();
         assert.equal(client.isOpen, false);
 
-        const [ping] = await Promise.all([
+        const [ping, quit] = await Promise.all([
             pingPromise,
-            assert.doesNotReject(quitPromise),
+            quitPromise,
             assert.rejects(client.ping(), ClientClosedError)
         ]);
 
         assert.equal(ping, 'PONG');
+        assert.equal(quit, 'OK');
     }, {
         ...GLOBAL.SERVERS.OPEN,
         disableClientSetup: true
@@ -849,4 +917,32 @@ describe('Client', () => {
         client.unref();
         client.ref();
     }, GLOBAL.SERVERS.OPEN);
+
+    testUtils.testWithClient('pingInterval', async client => {
+        assert.deepEqual(
+            await once(client, 'ping-interval'),
+            ['PONG']
+        );
+    }, {
+        ...GLOBAL.SERVERS.OPEN,
+        clientOptions: {
+            pingInterval: 1
+        }
+    });
+
+    testUtils.testWithClient('should reject commands in connect phase when `disableOfflineQueue`', async client => {
+        const connectPromise = client.connect();
+        await assert.rejects(
+            client.ping(),
+            ClientOfflineError
+        );
+        await connectPromise;
+        await client.disconnect();
+    }, {
+        ...GLOBAL.SERVERS.OPEN,
+        clientOptions: {
+            disableOfflineQueue: true
+        },
+        disableClientSetup: true
+    });
 });

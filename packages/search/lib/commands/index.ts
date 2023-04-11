@@ -1,5 +1,6 @@
 import * as _LIST from './_LIST';
 import * as ALTER from './ALTER';
+import * as AGGREGATE_WITHCURSOR from './AGGREGATE_WITHCURSOR';
 import * as AGGREGATE from './AGGREGATE';
 import * as ALIASADD from './ALIASADD';
 import * as ALIASDEL from './ALIASDEL';
@@ -7,6 +8,8 @@ import * as ALIASUPDATE from './ALIASUPDATE';
 import * as CONFIG_GET from './CONFIG_GET';
 import * as CONFIG_SET from './CONFIG_SET';
 import * as CREATE from './CREATE';
+import * as CURSOR_DEL from './CURSOR_DEL';
+import * as CURSOR_READ from './CURSOR_READ';
 import * as DICTADD from './DICTADD';
 import * as DICTDEL from './DICTDEL';
 import * as DICTDUMP from './DICTDUMP';
@@ -37,6 +40,8 @@ export default {
     _list: _LIST,
     ALTER,
     alter: ALTER,
+    AGGREGATE_WITHCURSOR,
+    aggregateWithCursor: AGGREGATE_WITHCURSOR,
     AGGREGATE,
     aggregate: AGGREGATE,
     ALIASADD,
@@ -51,6 +56,10 @@ export default {
     configSet: CONFIG_SET,
     CREATE,
     create: CREATE,
+    CURSOR_DEL,
+    cursorDel: CURSOR_DEL,
+    CURSOR_READ,
+    cursorRead: CURSOR_READ,
     DICTADD,
     dictAdd: DICTADD,
     DICTDEL,
@@ -125,8 +134,8 @@ export enum RedisSearchLanguages {
 
 export type PropertyName = `${'@' | '$.'}${string}`;
 
-export type SortByProperty = PropertyName | {
-    BY: PropertyName;
+export type SortByProperty = string | {
+    BY: string;
     DIRECTION?: 'ASC' | 'DESC';
 };
 
@@ -178,7 +187,7 @@ export enum SchemaFieldTypes {
 
 type CreateSchemaField<
     T extends SchemaFieldTypes,
-    E = Record<keyof any, any>
+    E = Record<PropertyKey, unknown>
 > = T | ({
     type: T;
     AS?: string;
@@ -186,7 +195,7 @@ type CreateSchemaField<
 
 type CreateSchemaCommonField<
     T extends SchemaFieldTypes,
-    E = Record<string, never>
+    E = Record<PropertyKey, unknown>
 > = CreateSchemaField<
     T,
     ({
@@ -206,6 +215,7 @@ type CreateSchemaTextField = CreateSchemaCommonField<SchemaFieldTypes.TEXT, {
     NOSTEM?: true;
     WEIGHT?: number;
     PHONETIC?: SchemaTextFieldPhonetics;
+    WITHSUFFIXTRIE?: boolean;
 }>;
 
 type CreateSchemaNumericField = CreateSchemaCommonField<SchemaFieldTypes.NUMERIC>;
@@ -215,6 +225,7 @@ type CreateSchemaGeoField = CreateSchemaCommonField<SchemaFieldTypes.GEO>;
 type CreateSchemaTagField = CreateSchemaCommonField<SchemaFieldTypes.TAG, {
     SEPARATOR?: string;
     CASESENSITIVE?: true;
+    WITHSUFFIXTRIE?: boolean;
 }>;
 
 export enum VectorAlgorithms {
@@ -282,6 +293,10 @@ export function pushSchema(args: RedisCommandArguments, schema: RediSearchSchema
                     args.push('PHONETIC', fieldOptions.PHONETIC);
                 }
 
+                if (fieldOptions.WITHSUFFIXTRIE) {
+                    args.push('WITHSUFFIXTRIE');
+                }
+
                 break;
 
             // case SchemaFieldTypes.NUMERIC:
@@ -295,6 +310,10 @@ export function pushSchema(args: RedisCommandArguments, schema: RediSearchSchema
 
                 if (fieldOptions.CASESENSITIVE) {
                     args.push('CASESENSITIVE');
+                }
+
+                if (fieldOptions.WITHSUFFIXTRIE) {
+                    args.push('WITHSUFFIXTRIE');
                 }
 
                 break;
@@ -485,6 +504,10 @@ export function pushSearchOptions(
 
     if (options?.DIALECT) {
         args.push('DIALECT', options.DIALECT.toString());
+    }
+
+    if (options?.RETURN?.length === 0) {
+        args.preserve = true;
     }
 
     return args;

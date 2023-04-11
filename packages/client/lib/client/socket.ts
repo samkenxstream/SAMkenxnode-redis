@@ -6,10 +6,26 @@ import { ConnectionTimeoutError, ClientClosedError, SocketClosedUnexpectedlyErro
 import { promiseTimeout } from '../utils';
 
 export interface RedisSocketCommonOptions {
+    /**
+     * Connection Timeout (in milliseconds)
+     */
     connectTimeout?: number;
+    /**
+     * Toggle [`Nagle's algorithm`](https://nodejs.org/api/net.html#net_socket_setnodelay_nodelay)
+     */
     noDelay?: boolean;
+    /**
+     * Toggle [`keep-alive`](https://nodejs.org/api/net.html#net_socket_setkeepalive_enable_initialdelay)
+     */
     keepAlive?: number | false;
-    reconnectStrategy?(retries: number): number | Error;
+    /**
+     * When the socket closes unexpectedly (without calling `.quit()`/`.disconnect()`), the client uses `reconnectStrategy` to decide what to do. The following values are supported:
+     * 1. `false` -> do not reconnect, close the client and flush the command queue.
+     * 2. `number` -> wait for `X` milliseconds before reconnecting.
+     * 3. `(retries: number, cause: Error) => false | number | Error` -> `number` is the same as configuring a `number` directly, `Error` is the same as `false`, but with a custom error.
+     * Defaults to `retries => Math.min(retries * 50, 500)`
+     */
+    reconnectStrategy?: false | number | ((retries: number, cause: Error) => false | Error | number);
 }
 
 type RedisNetSocketOptions = Partial<net.SocketConnectOpts> & {
@@ -42,10 +58,6 @@ export default class RedisSocket extends EventEmitter {
         options.noDelay ??= true;
 
         return options;
-    }
-
-    static #defaultReconnectStrategy(retries: number): number {
-        return Math.min(retries * 50, 500);
     }
 
     static #isTlsSocket(options: RedisSocketOptions): options is RedisTlsSocketOptions {
@@ -87,51 +99,84 @@ export default class RedisSocket extends EventEmitter {
         this.#options = RedisSocket.#initiateOptions(options);
     }
 
+    #reconnectStrategy(retries: number, cause: Error) {
+        if (this.#options.reconnectStrategy === false) {
+            return false;
+        } else if (typeof this.#options.reconnectStrategy === 'number') {
+            return this.#options.reconnectStrategy;
+        } else if (this.#options.reconnectStrategy) {
+            try {
+                const retryIn = this.#options.reconnectStrategy(retries, cause);
+                if (retryIn !== false && !(retryIn instanceof Error) && typeof retryIn !== 'number') {
+                    throw new TypeError(`Reconnect strategy should return \`false | Error | number\`, got ${retryIn} instead`);
+                }
+
+                return retryIn;
+            } catch (err) {
+                this.emit('error', err);    
+            }
+        }
+
+        return Math.min(retries * 50, 500);
+    }
+
+    #shouldReconnect(retries: number, cause: Error) {
+        const retryIn = this.#reconnectStrategy(retries, cause);
+        if (retryIn === false) {
+            this.#isOpen = false;
+            this.emit('error', cause);
+            return cause;
+        } else if (retryIn instanceof Error) {
+            this.#isOpen = false;
+            this.emit('error', cause);
+            return new ReconnectStrategyError(retryIn, cause);
+        }
+
+        return retryIn;
+    }
+
     async connect(): Promise<void> {
         if (this.#isOpen) {
             throw new Error('Socket already opened');
         }
 
-        return this.#connect(0);
+        this.#isOpen = true;
+        return this.#connect();
     }
 
-    async #connect(retries: number, hadError?: boolean): Promise<void> {
-        if (retries > 0 || hadError) {
-            this.emit('reconnecting');
-        }
-
-        try {
-            this.#isOpen = true;
-            this.#socket = await this.#createSocket();
-            this.#writableNeedDrain = false;
-            this.emit('connect');
-
+    async #connect(): Promise<void> {
+        let retries = 0;
+        do {
             try {
-                await this.#initiator();
+                this.#socket = await this.#createSocket();
+                this.#writableNeedDrain = false;
+                this.emit('connect');
+
+                try {
+                    await this.#initiator();
+                } catch (err) {
+                    this.#socket.destroy();
+                    this.#socket = undefined;
+                    throw err;
+                }
+                this.#isReady = true;
+                this.emit('ready');
             } catch (err) {
-                this.#socket.destroy();
-                this.#socket = undefined;
-                throw err;
-            }
-            this.#isReady = true;
-            this.emit('ready');
-        } catch (err) {
-            this.emit('error', err);
+                const retryIn = this.#shouldReconnect(retries++, err as Error);
+                if (typeof retryIn !== 'number') {
+                    throw retryIn;
+                }
 
-            const retryIn = (this.#options?.reconnectStrategy ?? RedisSocket.#defaultReconnectStrategy)(retries);
-            if (retryIn instanceof Error) {
-                this.#isOpen = false;
-                throw new ReconnectStrategyError(retryIn, err);
+                this.emit('error', err);
+                await promiseTimeout(retryIn);
+                this.emit('reconnecting');
             }
-
-            await promiseTimeout(retryIn);
-            return this.#connect(retries + 1);
-        }
+        } while (this.#isOpen && !this.#isReady);
     }
 
     #createSocket(): Promise<net.Socket | tls.TLSSocket> {
         return new Promise((resolve, reject) => {
-            const {connectEvent, socket} = RedisSocket.#isTlsSocket(this.#options) ?
+            const { connectEvent, socket } = RedisSocket.#isTlsSocket(this.#options) ?
                 this.#createTlsSocket() :
                 this.#createNetSocket();
 
@@ -187,7 +232,10 @@ export default class RedisSocket extends EventEmitter {
         this.#isReady = false;
         this.emit('error', err);
 
-        this.#connect(0, true).catch(() => {
+        if (!this.#isOpen || typeof this.#shouldReconnect(0, err) !== 'number') return;
+        
+        this.emit('reconnecting');
+        this.#connect().catch(() => {
             // the error was already emitted, silently ignore it
         });
     }
@@ -203,25 +251,34 @@ export default class RedisSocket extends EventEmitter {
     }
 
     disconnect(): void {
-        if (!this.#socket) {
-            throw new ClientClosedError();
-        } else {
-            this.#isOpen = this.#isReady = false;
-        }
-
-        this.#socket.destroy();
-        this.#socket = undefined;
-        this.emit('end');
-    }
-
-    async quit(fn: () => Promise<unknown>): Promise<void> {
         if (!this.#isOpen) {
             throw new ClientClosedError();
         }
 
         this.#isOpen = false;
-        await fn();
-        this.disconnect();
+        this.#disconnect();
+    }
+
+    #disconnect(): void {
+        this.#isReady = false;
+
+        if (this.#socket) {
+            this.#socket.destroy();
+            this.#socket = undefined;
+        }
+        
+        this.emit('end');
+    }
+
+    async quit<T>(fn: () => Promise<T>): Promise<T> {
+        if (!this.#isOpen) {
+            throw new ClientClosedError();
+        }
+
+        this.#isOpen = false;
+        const reply = await fn();
+        this.#disconnect();
+        return reply;
     }
 
     #isCorked = false;

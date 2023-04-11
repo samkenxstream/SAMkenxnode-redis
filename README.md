@@ -1,9 +1,8 @@
 # Node-Redis
 
-[![Tests](https://img.shields.io/github/workflow/status/redis/node-redis/Tests/master.svg?label=tests)](https://github.com/redis/node-redis/actions/workflows/tests.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/redis/node-redis/tests.yml?branch=master)](https://github.com/redis/node-redis/actions/workflows/tests.yml)
 [![Coverage](https://codecov.io/gh/redis/node-redis/branch/master/graph/badge.svg?token=xcfqHhJC37)](https://codecov.io/gh/redis/node-redis)
 [![License](https://img.shields.io/github/license/redis/node-redis.svg)](https://github.com/redis/node-redis/blob/master/LICENSE)
-[![LGTM alerts](https://img.shields.io/lgtm/alerts/g/redis/node-redis.svg?logo=LGTM)](https://lgtm.com/projects/g/redis/node-redis/alerts)
 
 [![Discord](https://img.shields.io/discord/697882427875393627.svg?style=social&logo=discord)](https://discord.gg/redis)
 [![Twitch](https://img.shields.io/twitch/status/redisinc?style=social)](https://www.twitch.tv/redisinc)
@@ -22,12 +21,20 @@ node-redis is a modern, high performance [Redis](https://redis.io) client for No
 | [@redis/bloom](./packages/bloom)             | [![Downloads](https://img.shields.io/npm/dm/@redis/bloom.svg)](https://www.npmjs.com/package/@redis/bloom) [![Version](https://img.shields.io/npm/v/@redis/bloom.svg)](https://www.npmjs.com/package/@redis/bloom) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/bloom/) [Redis Bloom](https://oss.redis.com/redisbloom/) commands                                          |
 | [@redis/graph](./packages/graph)             | [![Downloads](https://img.shields.io/npm/dm/@redis/graph.svg)](https://www.npmjs.com/package/@redis/graph) [![Version](https://img.shields.io/npm/v/@redis/graph.svg)](https://www.npmjs.com/package/@redis/graph) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/graph/) [Redis Graph](https://oss.redis.com/redisgraph/) commands                                          |
 | [@redis/json](./packages/json)               | [![Downloads](https://img.shields.io/npm/dm/@redis/json.svg)](https://www.npmjs.com/package/@redis/json) [![Version](https://img.shields.io/npm/v/@redis/json.svg)](https://www.npmjs.com/package/@redis/json) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/json/) [Redis JSON](https://oss.redis.com/redisjson/) commands                                                 |
-| [@redis/search](./packages/search)           | [![Downloads](https://img.shields.io/npm/dm/@redis/search.svg)](https://www.npmjs.com/package/@redis/search) [![Version](https://img.shields.io/npm/v/@redis/search.svg)](https://www.npmjs.com/package/@redis/search) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/search/) [Redis Search](https://oss.redis.com/redisearch/) commands                                    |
+| [@redis/search](./packages/search)           | [![Downloads](https://img.shields.io/npm/dm/@redis/search.svg)](https://www.npmjs.com/package/@redis/search) [![Version](https://img.shields.io/npm/v/@redis/search.svg)](https://www.npmjs.com/package/@redis/search) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/search/) [RediSearch](https://oss.redis.com/redisearch/) commands                                    |
 | [@redis/time-series](./packages/time-series) | [![Downloads](https://img.shields.io/npm/dm/@redis/time-series.svg)](https://www.npmjs.com/package/@redis/time-series) [![Version](https://img.shields.io/npm/v/@redis/time-series.svg)](https://www.npmjs.com/package/@redis/time-series) [![Docs](https://img.shields.io/badge/-documentation-dc382c)](https://redis.js.org/documentation/time-series/) [Redis Time-Series](https://oss.redis.com/redistimeseries/) commands |
 
 > :warning: In version 4.1.0 we moved our subpackages from `@node-redis` to `@redis`. If you're just using `npm install redis`, you don't need to do anything—it'll upgrade automatically. If you're using the subpackages directly, you'll need to point to the new scope (e.g. `@redis/client` instead of `@node-redis/client`).
 
 ## Installation
+
+Start a redis via docker:
+
+``` bash
+docker run -p 6379:6379 -it redis/redis-stack-server:latest
+```
+
+To install node-redis, simply:
 
 ```bash
 npm install redis
@@ -46,12 +53,13 @@ import { createClient } from 'redis';
 
 const client = createClient();
 
-client.on('error', (err) => console.log('Redis Client Error', err));
+client.on('error', err => console.log('Redis Client Error', err));
 
 await client.connect();
 
 await client.set('key', 'value');
 const value = await client.get('key');
+await client.disconnect();
 ```
 
 The above code connects to localhost on port 6379. To connect to a different host or port, use a connection string in the format `redis[s]://[[username][:password]@][host][:port][/db-number]`:
@@ -63,6 +71,8 @@ createClient({
 ```
 
 You can also use discrete parameters, UNIX sockets, and even TLS to connect. Details can be found in the [client configuration guide](./docs/client-configuration.md).
+
+To check if the the client is connected and ready to send commands, use `client.isReady` which returns a boolean. `client.isOpen` is also available.  This returns `true` when the client's underlying socket is open, and `false` when it isn't (for example when the client is still connecting or reconnecting after a network error).
 
 ### Redis Commands
 
@@ -156,47 +166,7 @@ To learn more about isolated execution, check out the [guide](./docs/isolated-ex
 
 ### Pub/Sub
 
-Subscribing to a channel requires a dedicated stand-alone connection. You can easily get one by `.duplicate()`ing an existing Redis connection.
-
-```typescript
-const subscriber = client.duplicate();
-
-await subscriber.connect();
-```
-
-Once you have one, simply subscribe and unsubscribe as needed:
-
-```typescript
-await subscriber.subscribe('channel', (message) => {
-  console.log(message); // 'message'
-});
-
-await subscriber.pSubscribe('channe*', (message, channel) => {
-  console.log(message, channel); // 'message', 'channel'
-});
-
-await subscriber.unsubscribe('channel');
-
-await subscriber.pUnsubscribe('channe*');
-```
-
-Publish a message on a channel:
-
-```typescript
-await publisher.publish('channel', 'message');
-```
-
-There is support for buffers as well:
-
-```typescript
-await subscriber.subscribe('channel', (message) => {
-  console.log(message); // <Buffer 6d 65 73 73 61 67 65>
-}, true);
-
-await subscriber.pSubscribe('channe*', (message, channel) => {
-  console.log(message, channel); // <Buffer 6d 65 73 73 61 67 65>, <Buffer 63 68 61 6e 6e 65 6c>
-}, true);
-```
+See the [Pub/Sub overview](./docs/pub-sub.md).
 
 ### Scan Iterator
 
@@ -363,15 +333,18 @@ Check out the [Clustering Guide](./docs/clustering.md) when using Node Redis to 
 
 The Node Redis client class is an Nodejs EventEmitter and it emits an event each time the network status changes:
 
-| Event name     | Scenes                                                                                                            | Arguments to be passed to the listener                                                                                                         |
-|----------------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
-| `connect`      | The client is initiating a connection to the server.                                                              | _No argument_                                                                                                                                  |
-| `ready`        | The client successfully initiated the connection to the server.                                                   | _No argument_                                                                                                                                  |
-| `end`          | The client disconnected the connection to the server via `.quit()` or `.disconnect()`.                            | _No argument_                                                                                                                                  |
-| `error`        | When a network error has occurred, such as unable to connect to the server or the connection closed unexpectedly. | 1 argument: The error object, such as `SocketClosedUnexpectedlyError: Socket closed unexpectedly` or `Error: connect ECONNREFUSED [IP]:[PORT]` |
-| `reconnecting` | The client is trying to reconnect to the server.                                                                  | _No argument_                                                                                                                                  |
+| Name                    | When                                                                               | Listener arguments                                         |
+|-------------------------|------------------------------------------------------------------------------------|------------------------------------------------------------|
+| `connect`               | Initiating a connection to the server                                              | *No arguments*                                             |
+| `ready`                 | Client is ready to use                                                             | *No arguments*                                             |
+| `end`                   | Connection has been closed (via `.quit()` or `.disconnect()`)                      | *No arguments*                                             |
+| `error`                 | An error has occurred—usually a network issue such as "Socket closed unexpectedly" | `(error: Error)`                                           |
+| `reconnecting`          | Client is trying to reconnect to the server                                        | *No arguments*                                             |
+| `sharded-channel-moved` | See [here](./docs/pub-sub.md#sharded-channel-moved-event)                          | See  [here](./docs/pub-sub.md#sharded-channel-moved-event) |
 
-The client will not emit [any other events](./docs/v3-to-v4.md#all-the-removed-events) beyond those listed above.
+> :warning: You **MUST** listen to `error` events. If a client doesn't have at least one `error` listener registered and an `error` occurs, that error will be thrown and the Node.js process will exit. See the [`EventEmitter` docs](https://nodejs.org/api/events.html#events_error_events) for more details.
+
+> The client will not emit [any other events](./docs/v3-to-v4.md#all-the-removed-events) beyond those listed above.
 
 ## Supported Redis versions
 
